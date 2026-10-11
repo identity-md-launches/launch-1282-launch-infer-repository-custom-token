@@ -236,6 +236,22 @@ contract LegacyRedeemerTest is Test {
         r.redeem(b, 1); // 1 wei of MXXN is worth 0 INFER
     }
 
+    /// @dev df1a15ed0608: clock upkeep consumes a separate donation, never a redemption's tokens.
+    function test_clockUpkeepNeedsDonatedDust() public {
+        assertEq(b.balanceOf(address(r)), 0);
+        vm.expectRevert();
+        r.advanceClock(b, 1);
+        vm.prank(HOLDER);
+        b.transfer(address(r), 2);
+        vm.prank(HOLDER);
+        r.redeem(b, 1_000_000e18);
+        assertEq(b.balanceOf(address(r)), 2, "redemption burns exactly what it receives");
+        r.advanceClock(b, 2);
+        assertEq(b.balanceOf(address(r)), 0);
+        vm.expectRevert();
+        r.advanceClock(b, 1);
+    }
+
     function test_constructorChecks() public {
         vm.expectRevert(LegacyRedeemer.SameToken.selector);
         new LegacyRedeemer(address(infer), address(a), 1, 1, address(a), 1, 1, address(treasury), FOUNDER);
@@ -341,6 +357,9 @@ contract LegacyRedeemerForkTest is Test {
     /// @dev MXXN: refused outside a full moon; 1-wei burns catch the clock up; redemption works inside the window;
     /// once the window passes, the redeemer advances the clock with its own dust.
     function test_mxxn_redeemsAtTheFullMoon() public {
+        assertEq(IERC20(MXXN).balanceOf(address(r)), 0);
+        vm.expectRevert();
+        r.advanceClock(IERC20(MXXN), 1); // launch has supplied no clock-upkeep dust
         vm.startPrank(MXXN_HOLDER);
         IERC20(MXXN).approve(address(r), type(uint256).max);
         vm.expectRevert();
@@ -365,6 +384,7 @@ contract LegacyRedeemerForkTest is Test {
         vm.stopPrank();
         assertEq(out, 1_000_000e18 * RATE_MXXN / 1e18);
         assertEq(infer.balanceOf(MXXN_HOLDER), out);
+        assertEq(IERC20(MXXN).balanceOf(address(r)), 1_000, "only the separate dust donation remains");
 
         (, end) = IMxxn(MXXN).moonConfig();
         vm.roll(end + 1); // the window has passed

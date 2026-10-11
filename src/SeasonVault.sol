@@ -12,7 +12,7 @@ import {SeasonAttestation} from "./SeasonAttestation.sol";
 /// of that season's points and vest linearly over 13 weeks from the root. What no season uses goes to the Treasury
 /// once the program is ended.
 ///
-/// Opening: `openSeason(startsAt, pot, formula)` by the governor, at least NOTICE (48 hours)
+/// Opening: `openSeason(startsAt, pot, formula)` by the governor, at least NOTICE (48 hours) and at most MAX_NOTICE (365 days)
 /// ahead and never overlapping the season before. Every season is exactly SEASON (13 weeks) long, and once opened
 /// neither its dates, its pot nor its rules can change. Pauses are the gaps between seasons, of any length; not opening another is how a
 /// season is skipped, and the earlier seasons keep vesting regardless. Nothing about the schedule is in the source:
@@ -52,6 +52,7 @@ contract SeasonVault is SeasonAttestation {
     uint256 public constant SEASONS = 5;
     uint256 public constant SEASON = 13 weeks;
     uint256 public constant NOTICE = 48 hours;
+    uint256 public constant MAX_NOTICE = 365 days;
     uint256 public constant REGISTRATION = 26 weeks;
     uint256 public constant ROOT_DEADLINE = 26 weeks;
     uint256 public constant GOVERNOR_DELAY = 48 hours;
@@ -108,6 +109,7 @@ contract SeasonVault is SeasonAttestation {
     error AllSeasonsOpened();
     error ProgramIsEnded();
     error TooSoon(uint256 earliest);
+    error TooFar(uint256 latest);
     error Overlaps(uint256 previousEnd);
     error ZeroPot();
     error NoFormula();
@@ -121,6 +123,7 @@ contract SeasonVault is SeasonAttestation {
     error NoRoot(uint256 season);
     error PastDeadline(uint256 season);
     error BadProof();
+    error OverRemainingTotal(uint256 amount, uint256 remaining);
     error NotYet(uint256 at);
     error AlreadyExpired(uint256 season);
     error NoEndAnnounced();
@@ -142,13 +145,14 @@ contract SeasonVault is SeasonAttestation {
 
     /// @notice Announce the next season: it runs [startsAt, startsAt + SEASON), pays out at most `pot`, and is
     /// judged by the rules document whose IPFS CID hashes to `formula` (keccak256(bytes(cid))). At least NOTICE
-    /// ahead, not before the previous season has ended, and never changed afterwards. Not while an end of the
+    /// ahead, at most MAX_NOTICE ahead, not before the previous season has ended, and never changed afterwards. Not while an end of the
     /// program is announced.
     function openSeason(uint64 startsAt, uint256 pot, bytes32 formula) external onlyGovernor returns (uint256 s) {
         if (ended || endEta != 0) revert ProgramIsEnded();
         s = opened;
         if (s == SEASONS) revert AllSeasonsOpened();
         if (startsAt < block.timestamp + NOTICE) revert TooSoon(block.timestamp + NOTICE);
+        if (startsAt > block.timestamp + MAX_NOTICE) revert TooFar(block.timestamp + MAX_NOTICE);
         if (s > 0 && startsAt < endOf(s - 1)) revert Overlaps(endOf(s - 1));
         if (pot == 0) revert ZeroPot();
         if (formula == bytes32(0)) revert NoFormula();
@@ -392,6 +396,8 @@ contract SeasonVault is SeasonAttestation {
         if (e.amount != 0) return; // already registered: release only
         bytes32 leaf = keccak256(bytes.concat(keccak256(abi.encode(s, account, amount))));
         if (!MerkleProof.verifyCalldata(proof, x.root, leaf)) revert BadProof();
+        uint256 remaining = x.total - x.registered;
+        if (amount > remaining) revert OverRemainingTotal(amount, remaining);
         e.amount = amount;
         x.registered += amount;
         emit Registered(s, account, amount);

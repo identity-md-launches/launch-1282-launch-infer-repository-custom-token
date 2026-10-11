@@ -110,7 +110,8 @@ contract StakingTest is Test {
         vm.prank(alice);
         uint256 shares = sinfer.deposit(1_000e18, alice);
         _buyback(10_000e18);
-        for (uint256 i; i < 168; ++i) { // a keeper dripping hourly for a week
+        for (uint256 i; i < 168; ++i) {
+            // a keeper dripping hourly for a week
             vm.warp(block.timestamp + 1 hours);
             dripper.drip();
         }
@@ -229,10 +230,18 @@ contract SeasonVaultTest is Test {
         bytes32 h = keccak256(
             bytes.concat(
                 abi.encode(
-                    seasons.ATTESTATION_TYPEHASH(), a.requestId, a.chainId, a.questionHash, a.answerType,
-                    keccak256(a.answer), a.figure, a.fromBlock
+                    seasons.ATTESTATION_TYPEHASH(),
+                    a.requestId,
+                    a.chainId,
+                    a.questionHash,
+                    a.answerType,
+                    keccak256(a.answer),
+                    a.figure,
+                    a.fromBlock
                 ),
-                abi.encode(a.toBlock, a.blockHash, a.panelJobId, a.panelSize, a.quorum, a.agreed, a.issuedAt, a.expiresAt)
+                abi.encode(
+                    a.toBlock, a.blockHash, a.panelJobId, a.panelSize, a.quorum, a.agreed, a.issuedAt, a.expiresAt
+                )
             )
         );
         (uint8 v, bytes32 r, bytes32 ss) =
@@ -315,7 +324,9 @@ contract SeasonVaultTest is Test {
 
     function test_atMostFiveSeasons() public {
         uint256 s = _open(1e18);
-        for (uint256 i; i < 4; ++i) s = _openAfter(s, 1e18);
+        for (uint256 i; i < 4; ++i) {
+            s = _openAfter(s, 1e18);
+        }
         assertEq(s, 4);
         vm.warp(seasons.endOf(4));
         vm.prank(GOVERNOR);
@@ -414,14 +425,17 @@ contract SeasonVaultTest is Test {
         _open(POT);
         uint256 t0 = seasons.season(0).start;
         bytes memory doc = seasons.seasonQuestion(0, keccak256("root"), 123e18, CID, RULES, 100, 200);
-        bytes memory want = bytes(string.concat("(unix time ", vm.toString(t0), " to ", vm.toString(t0 + 13 weeks), ")"));
+        bytes memory want =
+            bytes(string.concat("(unix time ", vm.toString(t0), " to ", vm.toString(t0 + 13 weeks), ")"));
         assertTrue(_contains(doc, want), "the window is the season's opened dates");
     }
 
     function _contains(bytes memory hay, bytes memory needle) private pure returns (bool) {
         for (uint256 i; i + needle.length <= hay.length; ++i) {
             bool m = true;
-            for (uint256 j; j < needle.length && m; ++j) m = hay[i + j] == needle[j];
+            for (uint256 j; j < needle.length && m; ++j) {
+                m = hay[i + j] == needle[j];
+            }
             if (m) return true;
         }
         return false;
@@ -674,6 +688,123 @@ contract SeasonVaultTest is Test {
         seasons.release(0, bob);
         assertEq(seasons.reserved(), 20e18, "only season 1's pot");
         assertLe(seasons.reserved(), infer.balanceOf(address(seasons)));
+    }
+
+    /// @dev aee37e82cc12: an inconsistent governor root must not spend the next season's reserves.
+    function test_governorLeafAboveTotalCannotRaidAnotherSeason() public {
+        _open(POT);
+        _openAfter(0, 210_000_000e18);
+        vm.warp(seasons.endOf(0));
+        bytes32 root = _leaf(0, alice, 150_000_000e18);
+        vm.prank(GOVERNOR);
+        seasons.proposeRoot(0, root, 1e18, RULES);
+        vm.warp(block.timestamp + 48 hours);
+        seasons.applyProposal(0);
+        vm.warp(block.timestamp + 13 weeks);
+
+        vm.expectRevert(abi.encodeWithSelector(SeasonVault.OverRemainingTotal.selector, 150_000_000e18, 1e18));
+        seasons.claim(0, alice, 150_000_000e18, new bytes32[](0));
+        assertEq(infer.balanceOf(alice), 0);
+        assertEq(seasons.season(0).registered, 0);
+        assertEq(seasons.reserved(), 210_000_001e18);
+
+        vm.warp(seasons.registrationDeadline(0));
+        seasons.expire(0); // no underflow: the whole declared total is unregistered
+        assertEq(seasons.reserved(), 210_000_000e18);
+        vm.warp(seasons.endOf(1) + 26 weeks);
+        seasons.expire(1);
+        assertEq(seasons.available(), 310_000_000e18);
+    }
+
+    function test_attestedLeavesAreCappedCumulativelyEvenAfterPayment() public {
+        (bytes32 root, bytes32[] memory pa, bytes32[] memory pb) = _tree(0, 60_000_000e18, 64_000_000e18);
+        _open(POT);
+        _openAfter(0, 210_000_000e18);
+        vm.warp(seasons.endOf(0));
+        _submit(0, root, POT);
+        vm.warp(block.timestamp + 13 weeks);
+        seasons.claim(0, alice, 60_000_000e18, pa);
+        seasons.claim(0, alice, 60_000_000e18, pa); // registered once, paid once
+        vm.expectRevert(abi.encodeWithSelector(SeasonVault.OverRemainingTotal.selector, 64_000_000e18, 40_000_000e18));
+        seasons.claim(0, bob, 64_000_000e18, pb);
+        assertEq(seasons.season(0).registered, 60_000_000e18);
+        assertEq(seasons.reserved(), 250_000_000e18);
+        assertEq(infer.balanceOf(alice), 60_000_000e18);
+        vm.warp(seasons.registrationDeadline(0));
+        seasons.expire(0);
+        assertEq(seasons.reserved(), 210_000_000e18);
+    }
+
+    function test_distributeCannotRegisterBeyondTotalAndRollsBackTheBatch() public {
+        (bytes32 root, bytes32[] memory pa, bytes32[] memory pb) = _tree(0, 2e18, 4e18);
+        _open(POT);
+        vm.warp(seasons.endOf(0));
+        _submit(0, root, 5e18);
+        vm.warp(block.timestamp + 13 weeks);
+        SeasonVault.Claim[] memory batch = new SeasonVault.Claim[](2);
+        batch[0] = SeasonVault.Claim(0, alice, 2e18, pa);
+        batch[1] = SeasonVault.Claim(0, bob, 4e18, pb);
+        vm.expectRevert(abi.encodeWithSelector(SeasonVault.OverRemainingTotal.selector, 4e18, 3e18));
+        seasons.distribute(batch);
+        assertEq(seasons.season(0).registered, 0);
+        assertEq(seasons.reserved(), 5e18);
+        assertEq(infer.balanceOf(alice), 0);
+    }
+
+    function testFuzz_registrationConservesTheDeclaredTotal(uint256 a, uint256 b, uint256 total) public {
+        a = bound(a, 1, POT);
+        b = bound(b, 1, POT);
+        total = bound(total, 0, POT);
+        (bytes32 root, bytes32[] memory pa, bytes32[] memory pb) = _tree(0, a, b);
+        _open(POT);
+        vm.warp(seasons.endOf(0));
+        _submit(0, root, total);
+        uint256 registered;
+        if (a > total) {
+            vm.expectRevert(abi.encodeWithSelector(SeasonVault.OverRemainingTotal.selector, a, total));
+        } else {
+            registered = a;
+        }
+        seasons.claim(0, alice, a, pa);
+        if (b > total - registered) {
+            vm.expectRevert(abi.encodeWithSelector(SeasonVault.OverRemainingTotal.selector, b, total - registered));
+        } else {
+            registered += b;
+        }
+        seasons.claim(0, bob, b, pb);
+        assertEq(seasons.season(0).registered, registered);
+        vm.warp(seasons.registrationDeadline(0));
+        seasons.expire(0);
+        assertEq(seasons.reserved(), registered);
+        seasons.release(0, alice);
+        seasons.release(0, bob);
+        assertEq(seasons.reserved(), 0);
+        assertEq(infer.balanceOf(address(seasons)), 310_000_000e18 - registered);
+    }
+
+    /// @dev af98e48a8ef8: milliseconds cannot reserve the allocation for tens of thousands of years.
+    function test_millisecondStartIsRefusedWithoutReservingThePot() public {
+        vm.warp(1_760_000_000);
+        vm.prank(GOVERNOR);
+        vm.expectRevert(abi.encodeWithSelector(SeasonVault.TooFar.selector, block.timestamp + 365 days));
+        seasons.openSeason(1_760_000_000_000, 310_000_000e18, keccak256(bytes(RULES)));
+        assertEq(seasons.opened(), 0);
+        assertEq(seasons.reserved(), 0);
+        assertEq(seasons.available(), 310_000_000e18);
+        _open(POT);
+    }
+
+    function test_startHorizonIsInclusiveAndRelativeToOpening() public {
+        uint256 latest = block.timestamp + 365 days;
+        vm.prank(GOVERNOR);
+        vm.expectRevert(abi.encodeWithSelector(SeasonVault.TooFar.selector, latest));
+        seasons.openSeason(uint64(latest + 1), POT, keccak256(bytes(RULES)));
+        vm.prank(GOVERNOR);
+        seasons.openSeason(uint64(latest), POT, keccak256(bytes(RULES)));
+        assertEq(seasons.endOf(0), latest + 13 weeks);
+        vm.warp(seasons.endOf(0) + 5 * 365 days); // long pauses are still permitted
+        _open(POT);
+        assertEq(seasons.opened(), 2);
     }
 }
 

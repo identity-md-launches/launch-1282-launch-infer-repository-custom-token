@@ -59,12 +59,13 @@ contract LaunchRehearsalForkTest is Test {
     address constant MIYA = 0xa358491CA72B793ddf21cF46C7289CC6e0ce9e5A;
     address constant MXXN = 0x2BBC21129E072A2A92A0Fd13DA750c1F977a25fB;
     address constant FOUNDER = 0x5167D014a056E43883e1BBEa5530c3c0dC993281;
-    address constant TREASURY = address(0x7EA5); // stands in for the protocol Treasury
-    address constant GOVERNOR = address(0x60F); // stands in for the governor
+    address constant TREASURY = 0x6Ac8fF96Fb8DCF5d79A8eF1E59D9AC23f2BD27Bc;
+    address constant GOVERNOR = 0xbeFd108085613662356aa26A2466Ad3426DA9C32;
+    GenesisSplitter constant SPLITTER = GenesisSplitter(0xE95311cccF156cB18194D523Cbe44cea33AD026E);
     uint64 constant LAUNCH = 4_000_000_002;
     uint256 constant TX_GAS_CAP = 16_777_216;
     uint16 constant POOL_BPS = 2_000;
-    int24 constant SPACING = 200;
+    int24 constant SPACING = 60;
     uint256 constant OPEN_FDV_IMD = 14_444_444444444444444444; // 14,444.44 IMD for the whole supply
 
     function setUp() public {
@@ -72,7 +73,10 @@ contract LaunchRehearsalForkTest is Test {
     }
 
     function test_launchFitsOneTransactionAndSplits() public {
-        GenesisSplitter splitter = new GenesisSplitter(FACTORY.registry(), TREASURY);
+        emit log_named_uint("mainnet fork block", block.number);
+        assertGt(address(SPLITTER).code.length, 0, "the launch's splitter must already exist");
+        assertEq(address(SPLITTER.registry()), FACTORY.registry());
+        assertEq(SPLITTER.treasury(), TREASURY);
 
         bytes memory tokenCode = type(InferToken).creationCode;
         address token = FACTORY.predictToken(LAUNCH, tokenCode);
@@ -80,7 +84,17 @@ contract LaunchRehearsalForkTest is Test {
         bytes[] memory codes = new bytes[](5);
         codes[0] = abi.encodePacked(
             type(LegacyRedeemer).creationCode,
-            abi.encode(token, MIYA, 100_000_000e18, 29417342782992946700, MXXN, 40_000_000e18, 7851289668371509, TREASURY, FOUNDER)
+            abi.encode(
+                token,
+                MIYA,
+                100_000_000e18,
+                29417342782992946700,
+                MXXN,
+                40_000_000e18,
+                7851289668371509,
+                TREASURY,
+                FOUNDER
+            )
         );
         codes[1] = abi.encodePacked(type(SeasonVault).creationCode, abi.encode(token, GOVERNOR, TREASURY));
         codes[2] = abi.encodePacked(type(StakedInfer).creationCode, abi.encode(token));
@@ -90,7 +104,7 @@ contract LaunchRehearsalForkTest is Test {
         codes[4] = abi.encodePacked(type(InferDripper).creationCode, abi.encode(token, sinfer, 1_000e18));
         bytes32[] memory names = new bytes32[](5);
         (names[0], names[1], names[2], names[3], names[4]) =
-            ("LegacyRedeemer", "SeasonVault", "StakedInfer", "FounderStream", "InferDripper");
+        ("LegacyRedeemer", "SeasonVault", "StakedInfer", "FounderStream", "InferDripper");
         address[] memory expected = new address[](5);
         for (uint256 i; i < 5; ++i) {
             expected[i] = FACTORY.predictContract(LAUNCH, i, codes[i]);
@@ -99,13 +113,13 @@ contract LaunchRehearsalForkTest is Test {
         IProjectFactory.CustomParams memory p;
         p.launchNumber = LAUNCH;
         p.tokenCreationCode = tokenCode;
-        p.tokenName = "INFER";
+        p.tokenName = "InferToken";
         p.contractCreationCodes = codes;
         p.contractNames = names;
         p.expectedContracts = expected;
         p.totalSupply = 1_000_000_000e18;
         p.poolBps = POOL_BPS;
-        p.remainderTo = address(splitter);
+        p.remainderTo = address(SPLITTER);
         p.merkleRoot = keccak256("swarm round");
         p.contributorLockSeconds = 1 hours;
         p.sweepDelaySeconds = 365 days;
@@ -124,9 +138,9 @@ contract LaunchRehearsalForkTest is Test {
         assertEq(t, token);
         assertLt(used, TX_GAS_CAP, "the launch must fit one transaction");
 
-        uint256 inSplitter = IERC20(token).balanceOf(address(splitter));
+        uint256 inSplitter = IERC20(token).balanceOf(address(SPLITTER));
         emit log_named_uint("remainder at the splitter (INFER)", inSplitter / 1e18);
-        splitter.split(LAUNCH);
+        SPLITTER.split(LAUNCH);
         assertEq(IERC20(token).balanceOf(contracts[0]), 140_000_000e18, "LegacyRedeemer");
         assertEq(IERC20(token).balanceOf(contracts[1]), 310_000_000e18, "SeasonVault");
         assertEq(IERC20(token).balanceOf(contracts[2]), 0, "StakedInfer declares nothing");
@@ -134,7 +148,12 @@ contract LaunchRehearsalForkTest is Test {
         assertEq(IERC20(token).balanceOf(contracts[4]), 0, "InferDripper declares nothing");
         assertEq(InferDripper(contracts[4]).vault(), contracts[2], "the dripper feeds this launch's sINFER");
         emit log_named_uint("Treasury (INFER)", IERC20(token).balanceOf(TREASURY) / 1e18);
-        assertApproxEqAbs(IERC20(token).balanceOf(TREASURY), 180_000_000e18, 2e18, "the rest, plus the 1 INFER the seed leaves and its rounding");
+        assertApproxEqAbs(
+            IERC20(token).balanceOf(TREASURY),
+            180_000_000e18,
+            2e18,
+            "the rest, plus the 1 INFER the seed leaves and its rounding"
+        );
     }
 
     /// @dev Single-sided INFER above the opening price: the pool holds only INFER until someone buys.
