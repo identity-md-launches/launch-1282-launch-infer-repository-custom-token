@@ -18,6 +18,26 @@ contract Plain is ERC20 {
 
 contract TreasuryLike {}
 
+/// @dev Mirrors MXXN's relevant clock behavior: at most one cycle advances per burn, only after its end.
+contract MoonClockToken is ERC20 {
+    uint256 public constant CYCLE = 100;
+    uint256 private end;
+
+    constructor(address holder) ERC20("Moon", "MOON") {
+        end = block.number + CYCLE;
+        _mint(holder, 9_000_000_000e18);
+    }
+
+    function moonConfig() external view returns (uint256, uint256) {
+        return (end - 10, end);
+    }
+
+    function burn(uint256 amount) external {
+        _burn(msg.sender, amount);
+        if (block.number > end) end += CYCLE;
+    }
+}
+
 /// @dev Just enough of an ERC-721 to test the NFT release.
 contract MockNft {
     mapping(uint256 => address) public ownerOf;
@@ -238,18 +258,32 @@ contract LegacyRedeemerTest is Test {
 
     /// @dev df1a15ed0608: clock upkeep consumes a separate donation, never a redemption's tokens.
     function test_clockUpkeepNeedsDonatedDust() public {
-        assertEq(b.balanceOf(address(r)), 0);
+        MoonClockToken clock = new MoonClockToken(HOLDER);
+        r = new LegacyRedeemer(
+            address(infer), address(a), ALLOC_A, RATE_A, address(clock), ALLOC_B, RATE_B, address(treasury), FOUNDER
+        );
+        infer.transfer(address(r), r.genesisAllocation());
+        (, uint256 end) = clock.moonConfig();
+        vm.roll(end + 1);
+        assertEq(clock.balanceOf(address(r)), 0);
         vm.expectRevert();
-        r.advanceClock(b, 1);
-        vm.prank(HOLDER);
-        b.transfer(address(r), 2);
-        vm.prank(HOLDER);
-        r.redeem(b, 1_000_000e18);
-        assertEq(b.balanceOf(address(r)), 2, "redemption burns exactly what it receives");
-        r.advanceClock(b, 2);
-        assertEq(b.balanceOf(address(r)), 0);
+        r.advanceClock(clock, 1);
+        vm.startPrank(HOLDER);
+        clock.transfer(address(r), 2);
+        clock.approve(address(r), 1_000_000e18);
+        r.redeem(clock, 1_000_000e18);
+        vm.stopPrank();
+        assertEq(clock.balanceOf(address(r)), 2, "redemption burns exactly what it receives");
+        for (uint256 i; i < 2; ++i) {
+            (, end) = clock.moonConfig();
+            vm.roll(end + 1);
+            r.advanceClock(clock, 2);
+            assertEq(clock.balanceOf(address(r)), 1 - i);
+        }
+        (, end) = clock.moonConfig();
+        vm.roll(end + 1);
         vm.expectRevert();
-        r.advanceClock(b, 1);
+        r.advanceClock(clock, 1);
     }
 
     function test_constructorChecks() public {
@@ -257,6 +291,103 @@ contract LegacyRedeemerTest is Test {
         new LegacyRedeemer(address(infer), address(a), 1, 1, address(a), 1, 1, address(treasury), FOUNDER);
         vm.expectRevert(LegacyRedeemer.ZeroAmount.selector);
         new LegacyRedeemer(address(infer), address(a), 0, 1, address(b), 1, 1, address(treasury), FOUNDER);
+    }
+
+    /// @dev 5a64b8041991: the agreed cap is per wallet; separate addresses are not one on-chain identity.
+    function test_immediateCapIsPerWalletAtTheLaunchRate() public {
+        LegacyRedeemer exact = new LegacyRedeemer(
+            address(infer),
+            address(a),
+            ALLOC_A,
+            29417342782992946700,
+            address(b),
+            ALLOC_B,
+            7851289668371509,
+            address(treasury),
+            FOUNDER
+        );
+        infer.transfer(address(exact), exact.genesisAllocation());
+        uint256 single = vm.snapshotState();
+        vm.startPrank(HOLDER);
+        a.approve(address(exact), 2_000_000e18);
+        uint256 out = exact.redeem(a, 2_000_000e18);
+        vm.stopPrank();
+        assertEq(infer.balanceOf(HOLDER), exact.immediateCapA());
+        assertEq(exact.owedVesting(), out - exact.immediateCapA());
+        vm.revertToState(single);
+
+        uint256 paid;
+        for (uint256 i; i < 10; ++i) {
+            address holder = address(uint160(0x1000 + i));
+            vm.prank(HOLDER);
+            a.transfer(holder, 200_000e18);
+            vm.startPrank(holder);
+            a.approve(address(exact), 200_000e18);
+            exact.redeem(a, 200_000e18);
+            vm.stopPrank();
+            (uint128 total,,) = exact.vestingOf(holder);
+            assertEq(total, 0);
+            paid += infer.balanceOf(holder);
+        }
+        assertEq(paid, out);
+        assertEq(exact.owedVesting(), 0);
+    }
+}
+
+contract ClockUpkeepRevisionTest is Test {
+    MoonClockToken moon;
+    Plain infer;
+    Plain miya;
+    LegacyRedeemer redeemer;
+
+    function setUp() public {
+        moon = new MoonClockToken(address(this));
+        infer = new Plain("INFER", address(this), 1_000_000_000e18);
+        miya = new Plain("MIYA", address(this), 1e18);
+        redeemer = new LegacyRedeemer(
+            address(infer),
+            address(miya),
+            100_000_000e18,
+            29417342782992946700,
+            address(moon),
+            40_000_000e18,
+            7851289668371509,
+            address(0x7EA),
+            address(0xF0F0)
+        );
+        moon.transfer(address(redeemer), 1000);
+    }
+
+    function test_currentClockCannotConsumeDustEvenWithRepeatedCalls() public {
+        (, uint256 end) = moon.moonConfig();
+        vm.roll(end);
+        redeemer.advanceClock(moon, 1000);
+        redeemer.advanceClock(moon, type(uint256).max);
+        assertEq(moon.balanceOf(address(redeemer)), 1000);
+    }
+
+    function test_catchupStopsWhenCurrentAndLaterWindowsStillAdvance() public {
+        (, uint256 end) = moon.moonConfig();
+        vm.roll(end + 201); // three cycles behind
+        redeemer.advanceClock(moon, 1000);
+        (, uint256 caughtUp) = moon.moonConfig();
+        assertEq(caughtUp, end + 300);
+        assertEq(moon.balanceOf(address(redeemer)), 997);
+        redeemer.advanceClock(moon, 1000);
+        assertEq(moon.balanceOf(address(redeemer)), 997);
+        vm.roll(caughtUp + 1);
+        redeemer.advanceClock(moon, 1000);
+        assertEq(moon.balanceOf(address(redeemer)), 996);
+    }
+
+    function test_stepsStillLimitsCatchupAndZeroDoesNothing() public {
+        (, uint256 end) = moon.moonConfig();
+        vm.roll(end + 201);
+        redeemer.advanceClock(moon, 0);
+        redeemer.advanceClock(moon, 2);
+        (, uint256 nextEnd) = moon.moonConfig();
+        assertEq(nextEnd, end + 200);
+        assertEq(moon.balanceOf(address(redeemer)), 998);
     }
 }
 
@@ -394,5 +525,7 @@ contract LegacyRedeemerForkTest is Test {
         r.advanceClock(IERC20(MXXN), 1); // anyone; burns 1 wei of the redeemer's own dust
         (uint256 nextStart,) = IMxxn(MXXN).moonConfig();
         assertEq(nextStart, start + CYCLE, "one cycle on");
+        r.advanceClock(IERC20(MXXN), 999); // an oversized request must stop once the real clock is current
+        assertEq(IERC20(MXXN).balanceOf(address(r)), 999, "future clock-upkeep dust is preserved");
     }
 }

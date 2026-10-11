@@ -1,5 +1,8 @@
 # INFER launch adaptation
 
+The sections through "Mainnet rehearsal and verification" record the previously accepted round.
+The revision review and its additional changes are recorded at the end of this document.
+
 ## Scope and unchanged terms
 
 Reviewed the supplied custom-token protected tests and security reference, then all seven source
@@ -155,3 +158,115 @@ Verification consisted of source review, reproduction, Foundry unit/fuzz tests a
 execution. Slither and Mythril were not run. Season roots still depend on the existing panel/governor
 trust model for correct allocations; the new registration bound enforces the total but does not
 calculate points or correct a bad leaf file. The NFT and dust operating steps remain necessary.
+
+## Revision review
+
+The accepted implementation was retained. Before changing production code, the four supplied proofs
+were copied unmodified to `test/scratch/` and run with
+`forge test --match-path 'test/scratch/Proof_*.t.sol' -vv`. The three previous proofs passed; both
+tests in `Proof_e31963921ec5.t.sol` failed, showing approximately 2,946.43 INFER stranded after the
+first drip. New delivered regressions reproduced the two SeasonVault issues and MXXN dust depletion.
+The real MXXN fork test also reproduced depletion: an extra 999-step call after catching up burned
+all 999 remaining dust units. No prior accepted fix was rewritten.
+
+### Dust-backed staking vault — e31963921ec591f0321720d932e20c350cb2228c47986b85d9577f0b7c4d0918
+
+`src/InferDripper.sol`: `drip` and `canDrip` now require at least `MIN_VAULT_SHARES = 1e9` real raw
+shares. StakedInfer has `1e6` virtual shares, so their fraction of each new reward is at most
+`1 / 1001`, below 0.1% apart from wei rounding. A nonzero balance alone was insufficient; direct
+asset donations can inflate backing without reducing virtual shares' weight. The share bound is
+independent of donations and is rechecked after withdrawals. Rejected calls preserve the buffer,
+keeper balance and timestamp; deposits can restore readiness. Token, ERC-4626 math, `minDrip`,
+release rates, keeper fee and schedules are unchanged. A small virtual-share fraction remains by
+design; this fix bounds it rather than removing the vault's inflation defense.
+
+`test/Revision.t.sol`: one-wei deposit, donation bypass attempt, exact share threshold, withdrawal
+below it, resumed staking followed by full exit, and 512 fuzz cases bounding each drip's virtual
+capture across floor and ordinary releases. Both supplied proof tests now pass.
+
+### Root-deadline race — 4cecd0d95ee3db8f123e9376130a04db20f12131751340526303504df2723dd8
+
+`src/SeasonVault.sol`: `_checkRootable` refuses a root at or after the existing
+`endOf(s) + ROOT_DEADLINE`, whether attested or proposed. `proposeRoot` also requires its 48-hour
+delay to finish strictly before that deadline. This makes root assignment and rootless expiry
+mutually exclusive. A proposal not applied in time expires with the pot; a pending proposal cannot
+extend or indefinitely block the existing expiry schedule. Equality belongs to expiry, so an ETA
+exactly at the deadline is refused too. No constants, season dates, pots or vesting periods changed.
+
+`test/Revision.t.sol`: the last-hour proposal is refused; ETA equality is refused; the last timely
+proposal and attested root succeed; late `applyProposal` and `submitAttestedRoot` cannot race
+`expire`. A refused signed submission does not consume its request ID. These tests failed on the
+starting implementation where appropriate, and now pass.
+
+### Registered claims after expiry — 8531094ce811e469d15171656a8f4056bc62920f660f96c5afc9e925a7a6556e
+
+`src/SeasonVault.sol`: `_register` recognizes an existing entitlement before checking the registration
+deadline. `claim` can therefore release the stored entitlement after the deadline or `expire`, just
+like `release` and `distribute`. New accounts still need a valid proof before the deadline and remain
+bounded by the root's unregistered total. Repeat calls cannot replace an entitlement or pay it twice.
+`test/Revision.t.sol` reproduces both prior `PastDeadline` failures and tests full payment, repeat
+calls, ignored replacement amounts, unchanged registered totals and refusal of new registrations.
+
+### Clock upkeep donation depletion — cff67a8803e4e70969bc36984022b963f2108553b1ecc3ab894a750833db85ef
+
+`src/LegacyRedeemer.sol`: for legacyB (the fixed MXXN slot), each iteration reads `moonConfig()` and
+stops when `block.number <= end`. Only a genuinely stale window consumes a donated wei. `steps`
+remains the caller's maximum work bound; calls remain permissionless, and constructors still make
+no external calls. LegacyA's existing dust-burn behavior is unchanged. A per-call step cap alone
+would not protect the donation against repeated calls, so the fix checks the actual clock instead.
+
+`test/LegacyRedeemer.t.sol`: a clock-aware token reproduces needless burning, then verifies current
+and future windows, repeated calls, the exact end block, multi-cycle catch-up, the caller's step
+limit, later-window upkeep and unfunded stale-clock failure. The earlier donation test now uses that
+clock-aware stand-in because the production code reads MXXN's clock. The mainnet test retains the
+actual NFT, transfer-window, burn and donation checks and adds the oversized upkeep regression.
+
+### Documented limits; no redesign
+
+- `5a64b8041991b3055ffbc51be80a3d59f4ce5cd081c98d8581eb82bf0e05804c`: reproduced at the launch
+  rates in `test_immediateCapIsPerWalletAtTheLaunchRate`. One 2M-MIYA redemption vests its excess;
+  ten wallets redeeming 200k each receive the same combined amount immediately. `README.md` now
+  explicitly states that the cap is per wallet, not per identity, and transferable tokens can be
+  split among wallets. Redemption behavior remains the agreed rule; no global cap was invented.
+- `6eee022f7ee474aba37c7c0e11fbddcfae25258c54010e1d7ef5754adf44eee3`: confirmed the governor's
+  ability to end an unopened program and route 310M to treasury after 48 hours, and the absence of
+  any automatic escape after 100 years without governor action. Both cases have delivered tests.
+  `README.md` records allocation authority and indefinite lock risk if the governor key is lost.
+- `476336530387afa5813e7adbe7cea0892e4840cf60513003ca572a2da9396a92`: confirmed the fixed signer
+  in source and tested immediate, final roots through the existing virtual test-signer hook.
+  `README.md` states that the one attester key is trusted for correctness and cannot be vetoed by
+  the governor. No signature checks or administrative powers changed.
+- `df1a15ed0608093215d62e61e42c9bb47be60cb3665d7c39a2978ea3fff7fa19`: the fork again reproduced
+  MIYA's NFT prerequisite and MXXN's donation requirement. The accepted operational plan remains
+  in `README.md`, with the new current-clock stopping behavior clarified.
+
+### Prior findings and formatting
+
+The original root-total, dust-grief and small-buffer findings (`aee37e82cc12`, `b45095aca81c`,
+`75c201f59354`) no longer reproduce: their supplied proofs passed on this revision's starting tree.
+The millisecond-start case (`af98e48a8ef8`) also reverted as intended in the existing regression.
+Their accepted fixes and tests were retained.
+
+`173c9143002d0cb525062ec245e5633df846fcba082823bef651aaf00c93ad76`: `forge fmt --check`
+reproduced formatting differences in `LegacyRedeemer.sol` and `SeasonAttestation.sol`.
+`forge fmt` was applied to delivered source/tests; SeasonAttestation's changes are formatting only.
+`README.md` describes the revised operational boundaries. `.imd-responses.json` records a verdict
+for every reported finding, including the earlier findings and documentation-only resolutions.
+
+### Revision verification
+
+- `forge build`: passed with the existing configuration; compiler/lint warnings remain.
+- `forge test`: 93 passed, 0 failed, 2 fork-suite setup skips, after removing the scratch proof copies.
+- `forge test --fork-url https://ethereum-rpc.publicnode.com -vv`: 97 passed, 0 failed, 0 skipped,
+  mainnet block 26,167,129. The live factory rehearsal used 8,973,631 gas and the existing splitter
+  paid every allocation in full. The real MIYA/MXXN prerequisite and upkeep tests passed.
+- All five tests across the four unmodified supplied proof files passed before scratch cleanup.
+- The five delivered fuzz tests each ran the configured 512 cases.
+- `forge fmt --check` and `git diff --check`: passed. All 13 response IDs are present exactly once
+  with valid verdicts in `.imd-responses.json`.
+- Production edits are confined to InferDripper, SeasonVault and LegacyRedeemer, plus formatting
+  in SeasonAttestation. The token, StakedInfer, FounderStream, constructor signatures, allocations,
+  rates, recipients, build configuration and dependencies are unchanged from the accepted tree.
+
+No packages were installed, no transactions were broadcast, and no manifest was written. Source
+review and Foundry tests were used; Slither and Mythril were not run in this revision.

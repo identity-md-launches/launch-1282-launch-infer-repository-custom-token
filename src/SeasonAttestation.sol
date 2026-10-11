@@ -106,7 +106,11 @@ abstract contract SeasonAttestation {
     function _window(uint256 season) internal view virtual returns (uint256 from, uint256 to);
 
     /// @dev The document up to the season's dates. Split from `_tail` only to stay within the stack.
-    function _head(uint256 season, string calldata cid, string calldata formulaCid) private view returns (bytes memory) {
+    function _head(uint256 season, string calldata cid, string calldata formulaCid)
+        private
+        view
+        returns (bytes memory)
+    {
         (uint256 from, uint256 to) = _window(season);
         return abi.encodePacked(
             '{"answerType":"bool","chainId":1,"definitions":{"formula":"The INFER points formula for this season, ipfs://',
@@ -161,7 +165,9 @@ abstract contract SeasonAttestation {
         if (block.timestamp > a.expiresAt) revert Expired();
         if (a.issuedAt > block.timestamp || a.issuedAt > a.expiresAt) revert InvalidTimestamp();
         if (usedRequests[a.requestId]) revert Replayed();
-        if (a.toBlock < a.fromBlock || (block.chainid == DATA_CHAIN_ID && a.toBlock > block.number)) revert BadWindow();
+        if (a.toBlock < a.fromBlock || (block.chainid == DATA_CHAIN_ID && a.toBlock > block.number)) {
+            revert BadWindow();
+        }
         if (a.questionHash != expected) revert WrongQuestion(expected, a.questionHash);
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, _attestationHash(a)));
         if (_recover(digest, sig) != _attester()) revert InvalidSignature();
@@ -192,7 +198,9 @@ abstract contract SeasonAttestation {
                     a.figure,
                     a.fromBlock
                 ),
-                abi.encode(a.toBlock, a.blockHash, a.panelJobId, a.panelSize, a.quorum, a.agreed, a.issuedAt, a.expiresAt)
+                abi.encode(
+                    a.toBlock, a.blockHash, a.panelJobId, a.panelSize, a.quorum, a.agreed, a.issuedAt, a.expiresAt
+                )
             )
         );
     }
@@ -215,9 +223,13 @@ abstract contract SeasonAttestation {
     function _decimal(uint256 value) private pure returns (bytes memory out) {
         if (value == 0) return "0";
         uint256 digits;
-        for (uint256 v = value; v != 0; v /= 10) ++digits;
+        for (uint256 v = value; v != 0; v /= 10) {
+            ++digits;
+        }
         out = new bytes(digits);
-        for (uint256 v = value; v != 0; v /= 10) out[--digits] = bytes1(uint8(48 + (v % 10)));
+        for (uint256 v = value; v != 0; v /= 10) {
+            out[--digits] = bytes1(uint8(48 + (v % 10)));
+        }
     }
 
     function _hex(bytes32 value) private pure returns (bytes memory out) {

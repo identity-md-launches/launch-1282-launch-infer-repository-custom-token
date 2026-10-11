@@ -5,7 +5,7 @@ Contracts for the INFER custom-token launch.
 | contract | what it is |
 |---|---|
 | `InferToken` | the token: fixed supply of 1,000,000,000, minted once to the launch factory |
-| `LegacyRedeemer` | burn MIYA or MXXN for INFER at fixed rates for one year; large redemptions vest |
+| `LegacyRedeemer` | burn MIYA or MXXN for INFER at fixed rates for one year; amounts above each wallet's cap vest |
 | `SeasonVault` | the points allocation, paid in seasons the governor opens; roots attested by a swarm panel (`SeasonAttestation`) |
 | `FounderStream` | the founder allocation, linear over 12 months with a 30-day cliff |
 | `StakedInfer` | sINFER, an ERC-4626 vault over INFER |
@@ -53,16 +53,43 @@ After launch:
    `releaseNft`; the fixed return recipient is `0x5167d014a056e43883e1bbea5530c3c0dc993281`.
 3. A MXXN holder must bring its moon clock current with 1-wei burns if needed, then donate upkeep dust
    to LegacyRedeemer during a permitted full-moon transfer window. Thereafter anyone can call
-   `advanceClock(MXXN, steps)`, consuming 1 wei of the donated MXXN per step. Redemption burns exactly
+   `advanceClock(MXXN, steps)`, consuming 1 wei per necessary clock step, up to `steps`, and stopping
+   once the window is current or ahead. Repeated calls then consume no dust. Redemption burns exactly
    its input and does not replenish this dust. MXXN's own transfer windows continue to apply.
 4. Governor `0xbefd108085613662356aa26a2466ad3426da9c32` opens seasons with 48 hours to 365 days of
    notice and a committed rules CID hash. Seasons still last 13 weeks and cannot overlap; arbitrary
    pauses are possible by waiting to open the next season. Publish the rules and leaf file when
-   requesting a panel attestation, or use the governor's existing 48-hour fallback.
-5. The treasury sends revenue-bought INFER to InferDripper. With shares outstanding, anyone calls
+   requesting a panel attestation, or use the governor's existing 48-hour fallback. Either root must be
+   applied strictly before 26 weeks after the season ends; a governor proposal must mature before
+   that deadline. Registered entitlements remain payable through `claim` or `release` after the
+   registration deadline and season expiry; new registrations are refused then.
+5. The treasury sends revenue-bought INFER to InferDripper. With at least `1e9` raw sINFER shares, anyone calls
    `drip()`. Ordinary releases keep the seven-day decay and one-hour catch-up cap. A small buffer
    releases up to 1,000 INFER per full hour, including its final dust, rather than remaining stuck.
+   The share minimum keeps virtual shares' fraction of a drip below 0.1%, apart from wei rounding.
+   Dripping resumes when deposits restore that minimum; direct asset donations cannot bypass it.
 
 The redemption year and founder vesting clock both begin at construction. Funding and the NFT/dust
 steps do not reset or extend them. These are post-launch asset transfers and permissionless operating
 calls, not initialization calls by the factory. See [ADAPTATION.md](ADAPTATION.md) for findings and tests.
+
+## Existing trust and identity limits
+
+LegacyRedeemer's immediate cap is per wallet and per legacy token, not per person: 200,000 MIYA
+at the fixed rate, or 930,000 INFER from MXXN. Amounts above a wallet's remaining cap vest for
+13 weeks. A holder able to transfer legacy tokens among fresh addresses can receive each address's
+cap immediately. There is no identity check or global immediate-payment budget; the fixed token
+allocations still cap aggregate redemption.
+
+The governor controls whether the 310M points allocation is used at all. It can end an unopened
+program after 48 hours and send all available INFER to the fixed treasury. Its delayed root can
+assign any accounts up to the pot, or assign zero and return the pot to available funds; an attested
+root can pre-empt it during the delay. The governor and treasury must be trusted with allocation
+and liveness. Losing the governor key before opening seasons or announcing an end can leave the
+unallocated funds locked indefinitely: there is no automatic program end or replacement governor.
+
+The attested path trusts the single fixed signer `0x5598Aa9146215Bc13eb26f2c692Ad1461Fd32982`
+to report the panel's decision honestly and keep its key secure. A valid signed YES for the exact
+question sets a timely root immediately and finally, without a governor veto or challenge delay.
+Signature binding, replay checks and pot limits do not establish that a leaf file assigns points
+correctly. These powers are the existing design and remain unchanged.

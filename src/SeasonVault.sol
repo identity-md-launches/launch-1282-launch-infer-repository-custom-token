@@ -36,6 +36,8 @@ import {SeasonAttestation} from "./SeasonAttestation.sol";
 ///   - the `governor`, as a fallback when a panel refuses, behind a 48-hour delay, during which an attested root
 ///     can still be submitted and the governor can withdraw its proposal.
 /// The root's `total` may not exceed the season's pot; the rest of the pot is released the moment the root is set.
+/// Both paths must set the root strictly before endOf(s) + ROOT_DEADLINE. A governor proposal must mature
+/// before that deadline too; an unapplied proposal does not extend it.
 ///
 /// Paying out: claims vest linearly over SEASON from the moment the root is set, and must be registered within
 /// REGISTRATION (26 weeks) of it. `claim` registers an entitlement with its proof and releases what has vested;
@@ -233,6 +235,7 @@ contract SeasonVault is SeasonAttestation {
     function proposeRoot(uint256 s, bytes32 root, uint256 total, string calldata formulaCid) external onlyGovernor {
         _checkFormula(s, formulaCid);
         _checkRootable(s, total);
+        if (block.timestamp + GOVERNOR_DELAY >= endOf(s) + ROOT_DEADLINE) revert PastDeadline(s);
         Season storage x = _seasons[s];
         (x.pendingRoot, x.pendingTotal, x.pendingEta) = (root, total, uint64(block.timestamp + GOVERNOR_DELAY));
         emit RootProposed(s, root, total, x.pendingEta);
@@ -376,6 +379,7 @@ contract SeasonVault is SeasonAttestation {
         if (block.timestamp < x.start + SEASON) revert SeasonNotOver(s);
         if (x.rootSetAt != 0) revert RootAlreadySet(s);
         if (x.expired) revert AlreadyExpired(s);
+        if (block.timestamp >= x.start + SEASON + ROOT_DEADLINE) revert PastDeadline(s);
         if (total > x.pot) revert OverPot(total, x.pot);
     }
 
@@ -390,10 +394,10 @@ contract SeasonVault is SeasonAttestation {
 
     function _register(uint256 s, address account, uint256 amount, bytes32[] calldata proof) private {
         Season storage x = _opened(s);
+        Entitlement storage e = entitlements[s][account];
+        if (e.amount != 0) return; // already registered: release only, even after registration closes
         if (x.rootSetAt == 0) revert NoRoot(s);
         if (x.expired || block.timestamp >= x.rootSetAt + REGISTRATION) revert PastDeadline(s);
-        Entitlement storage e = entitlements[s][account];
-        if (e.amount != 0) return; // already registered: release only
         bytes32 leaf = keccak256(bytes.concat(keccak256(abi.encode(s, account, amount))));
         if (!MerkleProof.verifyCalldata(proof, x.root, leaf)) revert BadProof();
         uint256 remaining = x.total - x.registered;

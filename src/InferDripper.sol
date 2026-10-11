@@ -17,14 +17,15 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 /// Permissionless `drip()` pays its caller KEEPER_BPS of the release for gas, and refuses below `minDrip` (a
 /// constructor word fixed at launch) so dust drips cannot farm the fee. After a full MAX_CATCHUP, a smaller step
 /// is raised to min(balance, minDrip), including the final dust, so small buybacks cannot be stranded forever.
-/// It refuses while sINFER has no shares:
-/// INFER landing in an empty ERC-4626 is captured by its virtual shares (sIMD measured 14% stranded that way).
+/// It refuses while sINFER has fewer than MIN_VAULT_SHARES real shares: with its 1e6 virtual shares,
+/// this keeps the virtual share of each drip below 0.1% (apart from wei rounding), even in a dust-sized vault.
 contract InferDripper {
     using SafeERC20 for IERC20;
 
     uint256 public constant DRAIN_PERIOD = 7 days;
     uint256 public constant MAX_CATCHUP = 1 hours;
     uint256 public constant KEEPER_BPS = 100; // 1% of each release
+    uint256 public constant MIN_VAULT_SHARES = 1e9; // 1,000 times StakedInfer's 1e6 virtual shares
 
     IERC20 public immutable infer;
     address public immutable vault; // sINFER
@@ -60,7 +61,7 @@ contract InferDripper {
     }
 
     function canDrip() external view returns (bool) {
-        return IERC20(vault).totalSupply() != 0 && _ready(releasable());
+        return IERC20(vault).totalSupply() >= MIN_VAULT_SHARES && _ready(releasable());
     }
 
     function _ready(uint256 amount) private view returns (bool) {
@@ -69,7 +70,7 @@ contract InferDripper {
 
     /// @notice Release the next step into sINFER and pay the caller 1% of it. Anyone.
     function drip() external returns (uint256 toVault, uint256 toKeeper) {
-        if (IERC20(vault).totalSupply() == 0) revert VaultEmpty();
+        if (IERC20(vault).totalSupply() < MIN_VAULT_SHARES) revert VaultEmpty();
         uint256 amount = releasable();
         if (!_ready(amount)) revert BelowMinDrip(amount, minDrip);
         lastDripAt = block.timestamp;

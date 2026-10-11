@@ -8,6 +8,10 @@ interface IBurnable {
     function burn(uint256 value) external;
 }
 
+interface IMoonClock {
+    function moonConfig() external view returns (uint256 start, uint256 end);
+}
+
 interface IERC721Like {
     function transferFrom(address from, address to, uint256 tokenId) external;
 }
@@ -194,7 +198,11 @@ contract LegacyRedeemer {
     }
 
     /// @notice How `holder` redeeming `amount` of `legacy` would be paid: at once, and vesting over a season.
-    function quoteFor(address holder, IERC20 legacy, uint256 amount) external view returns (uint256 now_, uint256 later) {
+    function quoteFor(address holder, IERC20 legacy, uint256 amount)
+        external
+        view
+        returns (uint256 now_, uint256 later)
+    {
         (, uint256 rate) = _terms(legacy);
         uint256 out = amount * rate / 1e18;
         uint256 roomNow = immediateCap(legacy) - paidImmediately[address(legacy)][holder];
@@ -211,11 +219,16 @@ contract LegacyRedeemer {
         emit Swept(amount);
     }
 
-    /// @notice Burn 1 wei of this contract's own `legacy` balance `steps` times. For MXXN each burn advances its
-    /// full-moon window one cycle; for a token without a clock it only burns dust. Anyone.
+    /// @notice Burn 1 wei of this contract's own `legacy` balance up to `steps` times. For MXXN (legacyB), stop
+    /// once its full-moon window is current or ahead; each necessary burn advances one cycle. For legacyA it
+    /// only burns dust. Anyone.
     function advanceClock(IERC20 legacy, uint256 steps) external {
         _terms(legacy);
         for (uint256 i; i < steps; ++i) {
+            if (legacy == legacyB) {
+                (, uint256 end) = IMoonClock(address(legacy)).moonConfig();
+                if (block.number <= end) break;
+            }
             IBurnable(address(legacy)).burn(1);
         }
     }
