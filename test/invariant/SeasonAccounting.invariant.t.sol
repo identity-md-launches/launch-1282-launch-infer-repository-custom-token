@@ -77,6 +77,14 @@ contract SeasonAccountingHandler is InferFixtures {
         Model storage m = model[s];
         if (m.rootAt != 0 || m.expired || block.timestamp < m.start + 13 weeks) return;
         total = bound(total, 4, m.pot);
+        if (block.timestamp + 48 hours >= m.start + 39 weeks) {
+            // A rejected replacement must leave any earlier proposal and its model intact.
+            bytes32 root = _root(s);
+            vm.prank(GOVERNOR);
+            vm.expectRevert(abi.encodeWithSelector(SeasonVault.PastDeadline.selector, s));
+            vault.proposeRoot(s, root, total, RULES);
+            return;
+        }
         m.total = total;
         for (uint256 i; i < 4; ++i) {
             m.allocation[i] = total / 4 + (i == 3 ? total % 4 : 0);
@@ -104,6 +112,9 @@ contract SeasonAccountingHandler is InferFixtures {
         } else if (block.timestamp < m.proposalEta) {
             vm.expectRevert(abi.encodeWithSelector(SeasonVault.TooEarly.selector, m.proposalEta));
             vault.applyProposal(s);
+        } else if (block.timestamp >= m.start + 39 weeks) {
+            vm.expectRevert(abi.encodeWithSelector(SeasonVault.PastDeadline.selector, s));
+            vault.applyProposal(s);
         } else {
             vault.applyProposal(s);
             m.rootAt = block.timestamp;
@@ -116,17 +127,22 @@ contract SeasonAccountingHandler is InferFixtures {
         uint256 i = actorSeed % 4;
         Model storage m = model[s];
         address actor = actors[i];
-        if (m.rootAt == 0 || m.expired || block.timestamp >= m.rootAt + 26 weeks) return;
+        if (m.rootAt == 0) return;
+        bool registrationClosed = !m.registered[i] && (m.expired || block.timestamp >= m.rootAt + 26 weeks);
         uint256 beforeBalance = token.balanceOf(actor);
         if (batch) {
             // Repeat the same leaf inside a batch: registration and payment must both be idempotent.
             SeasonVault.Claim[] memory items = new SeasonVault.Claim[](2);
             items[0] = SeasonVault.Claim(s, actor, m.allocation[i], _proof(s, i));
             items[1] = items[0];
+            if (registrationClosed) vm.expectRevert(abi.encodeWithSelector(SeasonVault.PastDeadline.selector, s));
             vault.distribute(items);
         } else {
-            vault.claim(s, actor, m.allocation[i], _proof(s, i));
+            bytes32[] memory proof = _proof(s, i);
+            if (registrationClosed) vm.expectRevert(abi.encodeWithSelector(SeasonVault.PastDeadline.selector, s));
+            vault.claim(s, actor, m.allocation[i], proof);
         }
+        if (registrationClosed) return;
         m.registered[i] = true;
         m.received[i] += token.balanceOf(actor) - beforeBalance;
         assertLe(m.received[i], m.allocation[i]);
@@ -279,6 +295,8 @@ contract SeasonAccountingHandler is InferFixtures {
         for (uint256 s; s < opened; ++s) {
             expire(s);
             for (uint256 i; i < 4; ++i) {
+                // Exercise both claim and distribute for stored entitlements after expiry.
+                if (model[s].registered[i]) claim(s, i, i % 2 == 0);
                 release(s, i);
                 if (model[s].registered[i]) assertEq(model[s].received[i], model[s].allocation[i]);
             }
@@ -322,6 +340,44 @@ contract SeasonAccountingInvariantTest is InferFixtures {
 
     function invariant_seasonReservesEqualAllOutstandingCommitments() public view {
         handler.assertAccounting();
+    }
+
+    function test_lateProposalReplacementAndApplicationPreserveReservesUntilExpiry() public {
+        SeasonVault vault = handler.vault();
+        uint256 deadline = vault.endOf(1) + 26 weeks;
+        vm.warp(vault.endOf(1));
+        handler.propose(1, 60_000_000e18);
+        bytes32 pending = vault.season(1).pendingRoot;
+        uint256 eta = vault.season(1).pendingEta;
+        vm.warp(deadline - 48 hours);
+        handler.propose(1, 4); // rejects an ETA exactly at the deadline, preserving the old proposal
+        assertEq(vault.season(1).pendingRoot, pending);
+        assertEq(vault.season(1).pendingEta, eta);
+        handler.assertAccounting();
+        vm.warp(deadline);
+        handler.applyRoot(1); // an unapplied proposal cannot extend the root window
+        handler.assertAccounting();
+        handler.expire(1);
+        assertEq(vault.season(1).pendingEta, 0);
+        handler.assertAccounting();
+        handler.finish();
+    }
+
+    function test_registeredClaimsAndBatchesSettleAcrossExpiryWhileNewClaimsFail() public {
+        SeasonVault vault = handler.vault();
+        handler.claim(0, 1, true);
+        handler.claim(0, 2, false);
+        vm.warp(vault.registrationDeadline(0));
+        handler.claim(0, 0, false);
+        handler.claim(0, 3, false); // this valid leaf was never registered
+        handler.assertAccounting();
+        handler.expire(0);
+        handler.claim(0, 1, true);
+        handler.claim(0, 2, false);
+        handler.claim(0, 3, true);
+        assertEq(vault.season(0).paid, 67_500_000e18);
+        handler.assertAccounting();
+        handler.finish();
     }
 
     function afterInvariant() public {

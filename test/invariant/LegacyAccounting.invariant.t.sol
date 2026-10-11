@@ -5,21 +5,39 @@ import {InferFixtures, BurnableLegacy} from "../helpers/InferFixtures.sol";
 import {InferToken} from "src/InferToken.sol";
 import {LegacyRedeemer} from "src/LegacyRedeemer.sol";
 
+/// @dev Only models the external clock interface and its single-cycle advance on transfers/burns.
+/// Real MXXN transfer-window restrictions remain covered by the existing mainnet fork suite.
+contract InvariantMoonLegacy is BurnableLegacy {
+    uint256 public constant CYCLE = 100;
+    uint256 private windowEnd = block.number + CYCLE;
+
+    function moonConfig() external view returns (uint256 start, uint256 end) {
+        return (windowEnd - 10, windowEnd);
+    }
+
+    function _update(address from, address to, uint256 amount) internal override {
+        super._update(from, to, amount);
+        if (from != address(0) && block.number > windowEnd) windowEnd += CYCLE;
+    }
+}
+
 contract LegacyAccountingHandler is InferFixtures {
     InferToken public token;
     BurnableLegacy public a;
-    BurnableLegacy public b;
+    InvariantMoonLegacy public b;
     LegacyRedeemer public redeemer;
     address[4] public actors;
     uint256[4] public earned;
     uint256[2] public inputsBurned;
+    uint256[2] public upkeepDonated;
+    uint256[2] public upkeepBurned;
     uint256 public funded;
     uint256 public swept;
 
     constructor() {
         token = new InferToken();
         a = new BurnableLegacy();
-        b = new BurnableLegacy();
+        b = new InvariantMoonLegacy();
         redeemer = _redeemer(token, a, b);
         funded = ALLOCATION_A + ALLOCATION_B;
         token.transfer(address(redeemer), funded);
@@ -83,7 +101,9 @@ contract LegacyAccountingHandler is InferFixtures {
     }
 
     function elapse(uint256 seconds_) public {
-        vm.warp(block.timestamp + bound(seconds_, 0, 35 days));
+        seconds_ = bound(seconds_, 0, 35 days);
+        vm.warp(block.timestamp + seconds_);
+        vm.roll(block.number + seconds_ / 12);
     }
 
     function donate(uint256 amount) public {
@@ -95,10 +115,26 @@ contract LegacyAccountingHandler is InferFixtures {
     function upkeep(bool slotB, uint256 steps) public {
         BurnableLegacy legacy = slotB ? b : a;
         steps = bound(steps, 0, 32);
+        uint256 slot = slotB ? 1 : 0;
+        uint256 expectedBurn = steps;
+        (, uint256 end) = b.moonConfig();
+        if (slotB) {
+            uint256 overdue = block.number > end ? (block.number - end + b.CYCLE() - 1) / b.CYCLE() : 0;
+            expectedBurn = min(steps, overdue);
+        }
+        uint256 beforeBalance = legacy.balanceOf(address(redeemer));
+        uint256 beforeSupply = legacy.totalSupply();
         // A separate donation pays for clock upkeep; it must never create an INFER entitlement.
         legacy.mint(address(redeemer), steps);
         redeemer.advanceClock(legacy, steps);
-        assertEq(legacy.balanceOf(address(redeemer)), 0);
+        upkeepDonated[slot] += steps;
+        upkeepBurned[slot] += expectedBurn;
+        assertEq(legacy.balanceOf(address(redeemer)), beforeBalance + steps - expectedBurn);
+        assertEq(legacy.totalSupply(), beforeSupply + steps - expectedBurn);
+        if (slotB) {
+            (, uint256 newEnd) = b.moonConfig();
+            assertEq(newEnd, end + expectedBurn * b.CYCLE());
+        }
     }
 
     function sweep() public {
@@ -139,8 +175,10 @@ contract LegacyAccountingHandler is InferFixtures {
         assertLe(redeemer.redeemed(address(b)), ALLOCATION_B);
         assertEq(redeemer.burned(address(a)), inputsBurned[0]);
         assertEq(redeemer.burned(address(b)), inputsBurned[1]);
-        assertEq(a.totalSupply() + inputsBurned[0], 8_000_000e18);
-        assertEq(b.totalSupply() + inputsBurned[1], 8_000_000_000e18);
+        assertEq(a.totalSupply() + inputsBurned[0] + upkeepBurned[0], 8_000_000e18 + upkeepDonated[0]);
+        assertEq(b.totalSupply() + inputsBurned[1] + upkeepBurned[1], 8_000_000_000e18 + upkeepDonated[1]);
+        assertEq(a.balanceOf(address(redeemer)), upkeepDonated[0] - upkeepBurned[0]);
+        assertEq(b.balanceOf(address(redeemer)), upkeepDonated[1] - upkeepBurned[1]);
         assertEq(token.totalSupply(), SUPPLY);
     }
 
@@ -179,6 +217,25 @@ contract LegacyAccountingInvariantTest is InferFixtures {
 
     function invariant_legacyBurnsAndInferLiabilitiesConserveValue() public view {
         handler.assertAccounting();
+    }
+
+    function test_upkeepPreservesCurrentWindowDustAndStopsAfterOnlyTheOverdueCycles() public {
+        InvariantMoonLegacy moon = handler.b();
+        address redeemer = address(handler.redeemer());
+        (, uint256 end) = moon.moonConfig();
+        vm.roll(end);
+        handler.upkeep(true, 32);
+        assertEq(moon.balanceOf(redeemer), 32);
+        vm.roll(end + 201); // three cycles overdue
+        handler.upkeep(true, 2);
+        assertEq(moon.balanceOf(redeemer), 32);
+        handler.upkeep(true, 32); // only one more burn is needed
+        assertEq(moon.balanceOf(redeemer), 63);
+        handler.upkeep(true, 32); // current again: the new donation must also survive
+        assertEq(moon.balanceOf(redeemer), 95);
+        handler.upkeep(true, 0);
+        handler.assertAccounting();
+        handler.finish();
     }
 
     function afterInvariant() public {

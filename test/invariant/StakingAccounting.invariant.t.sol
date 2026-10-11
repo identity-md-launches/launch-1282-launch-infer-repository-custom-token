@@ -161,7 +161,7 @@ contract StakingAccountingHandler is InferFixtures {
         uint256 vaultBefore = token.balanceOf(address(vault));
         uint256 keeperBefore = token.balanceOf(keeper);
         bool ready = dripper.canDrip();
-        if (vault.totalSupply() == 0) {
+        if (vault.totalSupply() < 1e9) {
             assertFalse(ready);
             vm.expectRevert(InferDripper.VaultEmpty.selector);
             dripper.drip();
@@ -189,6 +189,7 @@ contract StakingAccountingHandler is InferFixtures {
         assertEq(dripper.lastDripAt(), last);
         assertEq(token.balanceOf(address(dripper)), bufferBefore);
         assertEq(token.balanceOf(address(vault)), vaultBefore);
+        assertEq(token.balanceOf(keeper), keeperBefore);
     }
 
     function elapse(uint256 seconds_, uint256 blocks_) public {
@@ -280,6 +281,27 @@ contract StakingAccountingInvariantTest is InferFixtures {
 
     function invariant_sharesAssetsRewardsAndHoldsAreConserved() public view {
         handler.assertAccounting();
+    }
+
+    function test_dripsStopBelowShareThresholdAndResumeAtTheExactBoundary() public {
+        handler.finish(); // empty the initial vault through actual redemptions
+        handler.mint(0, 0, 1e9 - 1);
+        handler.elapse(1 hours, 1);
+        handler.drip(1); // nonzero supply still fails the minimum-share guard
+        handler.assertAccounting();
+        handler.mint(0, 0, 1);
+        assertEq(handler.vault().totalSupply(), 1e9);
+        handler.drip(1);
+        assertGt(handler.rewards(), 0);
+        handler.elapse(1 hours, 1);
+        handler.exit(0, 0, 1, false, false);
+        assertEq(handler.vault().totalSupply(), 1e9 - 1);
+        handler.drip(1);
+        handler.assertAccounting();
+        handler.mint(0, 0, 1);
+        handler.drip(2);
+        handler.assertAccounting();
+        handler.finish();
     }
 
     function afterInvariant() public {

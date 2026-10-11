@@ -90,3 +90,49 @@ splitter and legacy-token rehearsal, use `forge test --fork-url <mainnet RPC URL
 
 No additional implementation defect was reproduced by this contribution. No production
 behavior was changed or asserted as correct to bypass a failing property.
+
+## Revision: retain coverage after the accepted contract fixes
+
+The sections above record the preceding test contribution. On this revision's incoming tree,
+`forge test` reported 129 passed, four failed and two fork-only setups skipped. The failures
+were stale test expectations or fixtures following the accepted production fixes documented
+in the root `ADAPTATION.md`. This revision changes only the affected tests and their handlers;
+all six conservation invariants, their run counts and `fail-on-revert = true` remain in place.
+
+- `SeasonFailurePaths.t.sol`: create a pending proposal early enough to mature strictly before
+  the root deadline, then check that it cannot be applied at that deadline and expiry clears
+  it. A registered claimant must now receive its stored entitlement at/after the registration
+  deadline. A separate valid, unregistered leaf is rejected at the deadline and after expiry,
+  while the registered debt remains backed and payable.
+- `SeasonAccounting.invariant.t.sol`: late proposals/replacements and late applications now
+  expect `PastDeadline` without changing the model. Random direct and batch claims continue
+  for registered accounts after the deadline/expiry, while new registrations explicitly fail.
+  Terminal settlement also exercises both claim routes after expiry. Two deterministic
+  sequences retain coverage of pending-proposal preservation and late claimant settlement.
+- `LegacyAccounting.invariant.t.sol`: replace only the MXXN fixture with a burnable token
+  exposing `moonConfig()` and advancing one cycle per overdue transfer/burn. Time advancement
+  also advances blocks. Track upkeep donations and burns separately from redemption inputs,
+  including unused dust retained when the clock is current. Assert both token supply and
+  the redeemer's dust balance against those independent totals. A deterministic sequence
+  checks the inclusive window end, partial catch-up, stopping when current, and zero steps.
+  This simplified fixture does not simulate MXXN's transfer gating; the existing real-token
+  fork tests continue to cover that dependency.
+- `StakingAccounting.invariant.t.sol`: use the accepted minimum of `1e9` raw real shares when
+  predicting the dripper's refusal, and check keeper balances are also unchanged on failure.
+  A deterministic sequence redeems the initial stake, mints just below the threshold, reaches
+  it, withdraws below it and replenishes it, checking rejected and successful drips throughout.
+
+These are test corrections for the accepted fixes, not assertions blessing a newly discovered
+defect. No additional production defect was reproduced. No production source, configuration,
+dependency, allocation, rate, recipient, schedule or token behavior was changed. No new
+dependencies, environment mutations or network access are required for the local suite.
+
+Revision verification:
+
+- `forge build`: passed; existing lint warnings remain.
+- `forge test`: 138 passed, zero failed, two fork-only setups skipped.
+- `forge test --fork-url https://ethereum-rpc.publicnode.com -vv`: 142 passed, zero failed,
+  zero skipped, including the live ProjectFactory/GenesisSplitter and real MIYA/MXXN tests.
+- All six invariant suites run 256 sequences at their existing depths, totaling 139,264
+  randomized handler calls, plus terminal settlement, with zero unexpected handler reverts.
+- Only five existing files under `test/` changed; `git diff --check` passed.

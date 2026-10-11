@@ -128,12 +128,17 @@ contract SeasonFailurePathsTest is InferFixtures {
 
     function test_expiringRootlessSeasonCancelsPendingProposalAtExactDeadline() public {
         uint256 deadline = vault.endOf(0) + 26 weeks;
-        vm.warp(deadline - 1);
+        // A proposal must have time to mature before the root deadline, even if never applied.
+        vm.warp(deadline - 48 hours - 1);
         vm.prank(GOVERNOR);
         vault.proposeRoot(0, _root(0), POT, RULES);
+        assertEq(vault.season(0).pendingEta, deadline - 1);
+        vm.warp(deadline - 1);
         vm.expectRevert(abi.encodeWithSelector(SeasonVault.NotYet.selector, deadline));
         vault.expire(0);
         vm.warp(deadline);
+        vm.expectRevert(abi.encodeWithSelector(SeasonVault.PastDeadline.selector, 0));
+        vault.applyProposal(0);
         vault.expire(0);
         assertEq(vault.reserved(), 0);
         assertEq(vault.season(0).pendingEta, 0);
@@ -155,15 +160,33 @@ contract SeasonFailurePathsTest is InferFixtures {
         vm.warp(deadline - 1);
         assertEq(vault.claim(0, bob, 40e18, _proof(0, false)), 40e18);
         vm.warp(deadline);
-        bytes32[] memory proof = _proof(0, true);
-        vm.expectRevert(abi.encodeWithSelector(SeasonVault.PastDeadline.selector, 0));
-        vault.claim(0, alice, 60e18, proof);
+        assertEq(vault.claim(0, alice, 60e18, _proof(0, true)), 60e18);
         vault.expire(0);
-        assertEq(vault.release(0, alice), 60e18);
+        assertEq(vault.claim(0, alice, 60e18, _proof(0, true)), 0);
         assertEq(vault.release(0, alice), 0);
+        assertEq(vault.season(0).registered, POT);
         assertEq(vault.reserved(), 0);
         assertEq(token.balanceOf(alice), 60e18);
         assertEq(token.balanceOf(bob), 40e18);
+    }
+
+    function test_validUnregisteredLeafIsRefusedAtDeadlineWithoutLosingRegisteredDebt() public {
+        _setRoot();
+        vault.claim(0, alice, 60e18, _proof(0, true));
+        vm.warp(vault.registrationDeadline(0));
+        bytes32[] memory proof = _proof(0, false);
+        vm.expectRevert(abi.encodeWithSelector(SeasonVault.PastDeadline.selector, 0));
+        vault.claim(0, bob, 40e18, proof);
+        assertEq(vault.season(0).registered, 60e18);
+        assertEq(vault.reserved(), POT);
+        vault.expire(0);
+        assertEq(vault.reserved(), 60e18);
+        vm.expectRevert(abi.encodeWithSelector(SeasonVault.PastDeadline.selector, 0));
+        vault.claim(0, bob, 40e18, proof);
+        assertEq(vault.claim(0, alice, 60e18, _proof(0, true)), 60e18);
+        assertEq(vault.reserved(), 0);
+        assertEq(token.balanceOf(alice), 60e18);
+        assertEq(token.balanceOf(bob), 0);
     }
 
     function test_proofBindsSeasonRecipientAndAmountAndFailureDoesNotRegister() public {
