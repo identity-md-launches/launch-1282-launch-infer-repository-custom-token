@@ -1,0 +1,68 @@
+{
+  "kind": "custom_token",
+  "token": {
+    "contract": "InferToken",
+    "name": "Inference Backed Endogenous Financial Reserve",
+    "symbol": "INFER",
+    "decimals": 18,
+    "constructorArgs": [],
+    "totalSupply": "1000000000000000000000000000"
+  },
+  "contracts": [
+    {
+      "contract": "LegacyRedeemer",
+      "constructorArgs": [
+        "$token",
+        "0xa358491ca72b793ddf21cf46c7289cc6e0ce9e5a",
+        "100000000000000000000000000",
+        "29417342782992946700",
+        "0x2bbc21129e072a2a92a0fd13da750c1f977a25fb",
+        "40000000000000000000000000",
+        "7851289668371509",
+        "0x6ac8ff96fb8dcf5d79a8ef1e59d9ac23f2bd27bc",
+        "0x5167d014a056e43883e1bbea5530c3c0dc993281"
+      ]
+    },
+    {
+      "contract": "SeasonVault",
+      "constructorArgs": [
+        "$token",
+        "0xbefd108085613662356aa26a2466ad3426da9c32",
+        "0x6ac8ff96fb8dcf5d79a8ef1e59d9ac23f2bd27bc"
+      ]
+    },
+    {
+      "contract": "StakedInfer",
+      "constructorArgs": [
+        "$token"
+      ]
+    },
+    {
+      "contract": "FounderStream",
+      "constructorArgs": [
+        "$token",
+        "0x5167d014a056e43883e1bbea5530c3c0dc993281"
+      ]
+    },
+    {
+      "contract": "InferDripper",
+      "constructorArgs": [
+        "$token",
+        "$contract:StakedInfer",
+        "1000000000000000000000"
+      ]
+    }
+  ],
+  "pool": {
+    "pairedCurrency": "0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7",
+    "fee": 12500,
+    "tickSpacing": 60,
+    "initialPrice": "79228162514264337593543950336"
+  },
+  "economics": {
+    "poolBps": 2000,
+    "initialMarketCapWei": "14444444444444444444444",
+    "remainderTo": "0xe95311cccf156cb18194d523cbe44cea33ad026e"
+  },
+  "notes": "Ethereum mainnet launch paired with IMD. InferToken mints 1,000,000,000 INFER once to msg.sender, the factory, with 18 decimals, no owner, no subsequent mint or burn, and no transfer fee or restriction. After launch, split(launchNumber) on the existing GenesisSplitter at economics.remainderTo pays the genesisAllocation() declared by LegacyRedeemer (140,000,000 INFER), SeasonVault (310,000,000 INFER), and FounderStream (70,000,000 INFER), then sends the rest to 0x6ac8ff96fb8dcf5d79a8ef1e59d9ac23f2bd27bc. StakedInfer and InferDripper declare no genesis allocation. LegacyRedeemer burns MIYA or MXXN at the fixed constructor rates until one year after construction; amounts above each wallet's immediate cap vest over 13 weeks, and its final sweep preserves outstanding vesting obligations. MIYA redemption requires an eligible NFT held by the redeemer; MXXN requires its transfer window and separately donated dust for clock upkeep. SeasonVault supports up to five 13-week seasons opened by the fixed governor with at least 48 hours' notice and at most 365 days ahead; roots require a panel attestation or the governor's 48-hour proposal delay. FounderStream vests linearly from construction through day 365, first releasing at the 30-day cliff to the fixed beneficiary. StakedInfer is an ERC-4626 vault over INFER with 24-decimal shares and a one-block hold on newly minted shares. InferDripper streams deposited INFER buybacks into StakedInfer, with a fixed 1,000 INFER minimum drip and the implemented hourly floor and final-dust release. All constructor arguments are static or launch references; the only external constructor call is InferDripper reading the earlier StakedInfer's asset(). No initialization calls are required. pool.initialPrice records provenance; the deployer derives the opening price from economics.initialMarketCapWei and token.totalSupply."
+}
